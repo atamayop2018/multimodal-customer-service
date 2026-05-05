@@ -50,22 +50,10 @@ MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 # This configuration determines which API endpoint to call for each content type
 # and which flags indicate unsafe content.
 MODERATION_CONFIG = {
-    "text": {
-        "endpoint": f"{API_BASE_URL}/api/v1/moderate_text",
-        "unsafe_flags": ["is_unfriendly", "is_unprofessional", "contains_pii"],
-    },
-    "image": {
-        "endpoint": f"{API_BASE_URL}/api/v1/moderate_image_file",
-        "unsafe_flags": ["contains_pii", "is_disturbing", "is_low_quality"],
-    },
-    "video": {
-        "endpoint": f"{API_BASE_URL}/api/v1/moderate_video_file",
-        "unsafe_flags": ["contains_pii", "is_disturbing", "is_low_quality"],
-    },
-    "audio": {
-        "endpoint": f"{API_BASE_URL}/api/v1/moderate_audio_file",
-        "unsafe_flags": ["is_unfriendly", "is_unprofessional", "contains_pii"],
-    },
+    "text": {"endpoint": f"{API_BASE_URL}/api/v1/moderate_text"},
+    "image": {"endpoint": f"{API_BASE_URL}/api/v1/moderate_image_file"},
+    "video": {"endpoint": f"{API_BASE_URL}/api/v1/moderate_video_file"},
+    "audio": {"endpoint": f"{API_BASE_URL}/api/v1/moderate_audio_file"},
 }
 
 
@@ -184,12 +172,10 @@ def check_content_safety(*, text: str | None = None, media: str | None = None) -
         # Update span name now that we know the content type
         span.update_name(f"moderate_{content_type}")
 
-    # Check if any unsafe flags were set by the moderation service
-    config = MODERATION_CONFIG[content_type]
-    for flag in config["unsafe_flags"]:
-        if result[flag]:
-            # Content is unsafe - return False with feedback
-            return False, f"Content flagged: {feedback}", mime_type
+    # The backend response includes the `is_flagged` computed field from
+    # ModerationResult, which is True if any moderation flag is set.
+    if result.get("is_flagged"):
+        return False, f"Content flagged: {feedback}", mime_type
 
     # Content is safe - return True with feedback
     return True, feedback, mime_type
@@ -257,11 +243,23 @@ class ChatSessionWithTracing:
                     is_safe, safety_message, mime_type = check_content_safety(text=value)
 
                     if not is_safe:
-                        # Content flagged - block and return error
-                        feedback = f"⚠️ Content flagged: {safety_message}"
-                        response = "[This content was flagged by moderation and not sent to the AI. Please try again.]"
-
-                        span.set_attribute("feedback", feedback)
+                        # Content flagged - emit a dedicated "feedback" span as
+                        # a child of chat_turn so the moderation feedback step
+                        # can be queried and timed independently in Phoenix.
+                        with tracer.start_as_current_span("feedback") as feedback_span:
+                            feedback = f"⚠️ Content flagged: {safety_message}"
+                            response = (
+                                "[This content was flagged by moderation and not sent to the AI. "
+                                "Please try again.]"
+                            )
+                            feedback_span.set_attributes(
+                                {
+                                    "feedback": feedback,
+                                    "feedback.content_type": "text",
+                                    "feedback.flagged": True,
+                                }
+                            )
+                            span.set_attribute("feedback", feedback)
 
                         return response, past_messages, feedback
 
@@ -279,11 +277,22 @@ class ChatSessionWithTracing:
                             is_safe, safety_message, mime_type = check_content_safety(media=file_path)
 
                             if not is_safe:
-                                # Content flagged - block and return error
-                                feedback = f"⚠️ Content flagged: {safety_message}"
-                                response = (
-                                    "[This content was flagged by moderation and not sent to the AI. Please try again.]"
-                                )
+                                # Content flagged - emit a dedicated "feedback" span
+                                with tracer.start_as_current_span("feedback") as feedback_span:
+                                    feedback = f"⚠️ Content flagged: {safety_message}"
+                                    response = (
+                                        "[This content was flagged by moderation and not sent to the AI. "
+                                        "Please try again.]"
+                                    )
+                                    feedback_span.set_attributes(
+                                        {
+                                            "feedback": feedback,
+                                            "feedback.content_type": mime_type.split("/")[0],
+                                            "feedback.file_path": file_path,
+                                            "feedback.flagged": True,
+                                        }
+                                    )
+                                    span.set_attribute("feedback", feedback)
 
                                 return response, past_messages, feedback
 

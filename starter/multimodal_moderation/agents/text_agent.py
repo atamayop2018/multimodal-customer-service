@@ -25,7 +25,7 @@ Detect if:
 </instructions>
 
 <output>
-Provide a detailed rationale for your choices as well as a confidence score between 0 and 1 on your assessment.
+Provide a detailed rationale for your choices.
 </output>
 """
 
